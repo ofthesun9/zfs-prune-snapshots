@@ -1,0 +1,124 @@
+#!/bin/bash
+#
+# script to prune zfs snapshots or bookmarks
+# by creation date, and keep the most recent ones
+# License: MIT
+#
+# inspired by zfs-prune-snapshots
+# https://github.com/bahamas10/zfs-prune-snapshots 
+# From: Dave Eddy <dave@daveeddy.com> 
+
+VERSION='v0.1'
+
+usage() {
+	local prog=${0##*/}
+	cat <<-EOF
+	usage: $prog [-hnv] <bookmark|snapshot> <num> [[dataset1] ...]
+	destroy bookmarks or snapshots from one or more datasets except the last <num> ones
+	examples
+	    # $prog bookmark 0 tank/ds
+	    remove all bookmarks from tank/ds
+	    # $prog -vn  bookmark 0 tank/ds
+	    same as above, but with increased verbosity and without
+	    actually deleting any bookmark (dry-run)
+	    # $prog -p 'autosnap_' bookmark 1 tank/ds
+	    remove bookmarks but keep the last one, that start
+	    with the string "autosnap_"
+	    # $prog -s '_frequent' snapshot 1 tank/ds
+	    remove snapshots but keep the last one, that end
+	    with the string "_frequent"
+	options
+	    -h             print this message and exit
+	    -n             dry-run, don't actually delete snapshots
+	    -q             quiet, do not printout removed snapshots
+	    -v             increase verbosity
+	    -V             print the version number and exit
+	EOF
+}
+
+debug() {
+	((verbosity >= 1)) && echo "$@"
+	return 0
+}
+
+if ! type -P zfs &>/dev/null; then
+	echo "Error! zfs command not found. Are you on the right machine?"
+	exit 1
+fi
+
+dryrun=false
+verbosity=0
+prefix=
+suffix=
+quiet=false
+subcommand=""
+dataset=""
+retention=0
+
+# Parse options to the `zfs-clean` command
+while getopts 'hnqp:s:vV' option; do
+	case "$option" in
+		h) usage; exit 0;;
+		n) dryrun=true;;
+		p) prefix=$OPTARG;;
+		s) suffix=$OPTARG;;
+		q) quiet=true;;
+		v) ((verbosity++));;
+		V) echo "$VERSION"; exit 0;;
+		*) usage; exit 1;;
+	esac
+done
+shift "$((OPTIND - 1))"
+
+subcommand=$1;
+case "$subcommand" in
+  # Parse options to the install sub command
+  bookmark) ;;
+  snapshot) ;;
+  *)
+    echo 'error: the first argument must be either bookmark or snapshot' >&2
+    exit 1
+esac
+shift
+
+retention=$1
+if [ ! -z "${retention##*[!0-9]*}" ]
+ then
+   debug "we will keep ${retention} ${subcommand}(s)" 
+ else
+   echo 'error: an integer must be specified as the second argument' >&2
+   exit 1
+fi
+shift
+
+retention=$((retention+1))
+pools=("$@")
+code=0
+while read -r snapshot; do
+	# ensure optional prefix matches
+	snapname=${snapshot#*[@,#]}
+	if [[ -n $prefix && $prefix != "${snapname:0:${#prefix}}" ]]; then
+		debug "skipping $snapshot: doesn't match prefix $prefix"
+		continue
+	fi
+
+	# ensure optional suffix matches
+	if [[ -n $suffix && $suffix != "${snapname: -${#suffix}}" ]]; then
+		debug "skipping $snapshot: doesn't match suffix $suffix"
+		continue
+	fi
+
+	# remove the snapshot
+	if ! $quiet || $dryrun; then
+		echo -n "removing $snapshot"
+	fi
+	if $dryrun; then
+		echo ' <dry-run: no action taken>'
+	else
+		if ! $quiet; then
+			echo
+		fi
+		zfs destroy "$snapshot" || code=1
+	fi
+done < <(zfs list -Ho name -S creation -t ${subcommand} "${pools[@]}" | tail +${retention})
+exit "$code"
